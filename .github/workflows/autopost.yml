@@ -96,7 +96,7 @@ jobs:
 
           const curH = nowJ.getUTCHours(), curM = Math.floor(nowJ.getUTCMinutes()/5)*5;
           const CUR = padHHMM(curH,curM);
-          // if(!selected.has(CUR)){ console.log("skip", CUR, "target:", countToday, "picked:", selected.size); process.exit(0); }
+          if(!selected.has(CUR)){ console.log("skip", CUR, "target:", countToday, "picked:", selected.size); process.exit(0); }
 
           function choiceWeighted(rng, arr){ const sum=arr.reduce((s,i)=>s+i.w,0); let r=rng()*sum; for(const i of arr){ r-=i.w; if(r<=0) return i.v; } return arr[arr.length-1].v; }
           const theme = choiceWeighted(rng, [
