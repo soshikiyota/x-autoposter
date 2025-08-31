@@ -1,0 +1,152 @@
+name: discover related accounts
+
+on:
+  schedule:
+    - cron: "5 0 * * *"   # UTC=00:05 → JST=09:05に相当（毎朝）
+  workflow_dispatch:
+
+permissions:
+  contents: write   # リストを書き戻すため
+
+jobs:
+  build-list:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: |
+          npm init -y >/dev/null 2>&1
+          npm i twitter-api-v2
+
+            - name: Create discover script
+        run: |
+          cat > discover.js <<'EOF'
+          const { TwitterApi } = require('twitter-api-v2');
+          const fs = require('fs');
+
+          // -------- settings --------
+          const SEED_SAMPLE = 20;        // 種にする自分のフォローのサンプル数
+          const SEED_FOLLOW_LIMIT = 200; // 各種アカのフォローを何件見るか
+          const OUTPUT_TOP = 50;         // 出力件数
+          const VERIFIED_BONUS = 0.8;    // ★ verified(青バッジ)の加点（0.8なら「+0.8票」分の重み）
+          const ONLY_VERIFIED = false;   // ★ trueにすると青バッジのみ出力
+          const SALT = process.env.SALT || 'soshi';
+
+          // -------- helpers --------
+          function jstNow(){ return new Date(Date.now()+9*3600*1000); }
+          function pad2(n){ return String(n).padStart(2,'0'); }
+          function ymdNum(d){ return Number(`${d.getUTCFullYear()}${pad2(d.getUTCMonth()+1)}${pad2(d.getUTCDate())}`); }
+          function mulberry32(seed){ return function(){ let t=seed+=0x6D2B79F5; t=Math.imul(t^(t>>>15),t|1); t^=t+Math.imul(t^(t>>>7),t|61); return ((t^(t>>>14))>>>0)/4294967296; }; }
+          function hashStr(s){ let h=2166136261>>>0; for (let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619);} return h>>>0; }
+          function rngForToday(){ const seed=(ymdNum(jstNow()) ^ hashStr(SALT))>>>0; return mulberry32(seed); }
+
+          (async()=>{
+            try{
+              const client = new TwitterApi({
+                appKey: process.env.X_CONSUMER_KEY,
+                appSecret: process.env.X_CONSUMER_SECRET,
+                accessToken: process.env.X_ACCESS_TOKEN,
+                accessSecret: process.env.X_ACCESS_SECRET,
+              });
+
+              // 自分
+              const me = await client.v2.me();
+              const myId = me.data.id;
+
+              // 自分がフォロー中（最大2000までざっくり）
+              const myFollowing = await client.v2.following(myId, {
+                asPaginator: true,
+                max_results: 1000,
+                // verifiedフラグをもらう
+                'user.fields': ['verified','verified_type','public_metrics','username','name']
+              });
+              const seeds = myFollowing.data?.map(u => ({ id:u.id, username:u.username })) || [];
+              if (!seeds.length) { console.log('You follow nobody yet.'); process.exit(0); }
+
+              // 乱択で SEED_SAMPLE を選ぶ
+              const rng = rngForToday();
+              for (let i=seeds.length-1; i>0; i--) { const j = Math.floor(rng()*(i+1)); [seeds[i],seeds[j]]=[seeds[j],seeds[i]]; }
+              const pickedSeeds = seeds.slice(0, Math.min(SEED_SAMPLE, seeds.length));
+
+              // 自分のフォロー済み集合
+              const already = new Set(seeds.map(s => s.id));
+
+              // 候補集計
+              //   score: { count: 何人のseedがフォローしてたか, username, verified }
+              const score = new Map();
+
+              for (const s of pickedSeeds) {
+                try{
+                  const f = await client.v2.following(s.id, {
+                    asPaginator:true,
+                    max_results: SEED_FOLLOW_LIMIT,
+                    'user.fields': ['verified','verified_type','username','name']
+                  });
+
+                  for (const u of (f.data||[])) {
+                    if (already.has(u.id)) continue;      // 既フォローは除外
+                    if (u.id === myId) continue;           // 自分は除外
+                    if (ONLY_VERIFIED && !u.verified) continue; // verified限定モード
+
+                    const ent = score.get(u.id) || { count:0, username:u.username, verified: !!u.verified };
+                    ent.count += 1;
+                    ent.username = u.username;
+                    ent.verified = !!u.verified;
+                    score.set(u.id, ent);
+                  }
+                }catch(e){
+                  console.log('seed error', s.username, e?.data || e?.message || e);
+                }
+              }
+
+              // スコア整形（verifiedを上に：count + VERIFIED_BONUS）
+              const arr = [...score.entries()]
+                .map(([id, v]) => ({
+                  id, username: v.username, verified: v.verified,
+                  rawCount: v.count,
+                  weight: v.count + (v.verified ? VERIFIED_BONUS : 0)
+                }))
+                .sort((a,b) => b.weight - a.weight || b.rawCount - a.rawCount)
+                .slice(0, OUTPUT_TOP);
+
+              if (!arr.length) { console.log('No candidates found.'); process.exit(0); }
+
+              // 保存（1行1ユーザー名）※verifiedはログにだけ出す
+              fs.writeFileSync('follow_list.txt', arr.map(x => x.username).join('\n'));
+              console.log('top candidates (first 10):', arr.slice(0,10));
+              console.log(`verified ratio in top: ${arr.filter(x=>x.verified).length}/${arr.length}`);
+
+            }catch(e){
+              console.error('fatal', e);
+              process.exit(1);
+            }
+          })();
+          EOF
+
+      - name: Run discover
+        env:
+          X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
+          X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+          SALT: ${{ secrets.SALT }}
+        run: node discover.js
+
+      - name: Commit follow_list.txt
+        if: success()
+        run: |
+          if [ -f follow_list.txt ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add follow_list.txt
+            git commit -m "update follow_list.txt (auto)"
+            git push
+          else
+            echo "follow_list.txt not found, skip commit"
+          fi
