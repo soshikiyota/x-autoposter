@@ -2,31 +2,20 @@ name: X autopost (variable daily schedule)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"   # 5分ごとチェック（UTC）
   workflow_dispatch:
-
-concurrency:
-  group: x-autopost-daily
-  cancel-in-progress: false
-
-permissions:
-  contents: read   # checkout用（デフォルトでもOK）
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    env:
-      TZ: Asia/Tokyo
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
-      - name: Install deps
-        run: |
+      - run: |
           npm init -y >/dev/null 2>&1
           npm i twitter-api-v2
 
@@ -35,105 +24,247 @@ jobs:
           cat > post.js <<'EOF'
           const { TwitterApi } = require('twitter-api-v2');
 
-          // ---------- helpers ----------
+          // ===== helpers =====
           const SALT = process.env.SALT || 'soshi';
           function jstNow(){ return new Date(Date.now() + 9*3600*1000); }
           function pad2(n){ return String(n).padStart(2,'0'); }
+          function padHHMM(h,m){ return `${pad2(h)}:${pad2(m)}`; }
           function ymdNum(d){ return Number(`${d.getUTCFullYear()}${pad2(d.getUTCMonth()+1)}${pad2(d.getUTCDate())}`); }
-
-          // seeded PRNG
           function mulberry32(seed){ return function(){ let t=seed+=0x6D2B79F5; t=Math.imul(t^(t>>>15),t|1); t^=t+Math.imul(t^(t>>>7),t|61); return ((t^(t>>>14))>>>0)/4294967296; }; }
           function hashStr(s){ let h=2166136261>>>0; for (let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619);} return h>>>0; }
-          function rngForToday(){ const d=jstNow(); const seed=(ymdNum(d)^hashStr(SALT))>>>0; return mulberry32(seed); }
+          function rngForToday(){ const seed=(ymdNum(jstNow()) ^ hashStr(SALT))>>>0; return mulberry32(seed); }
           function randInt(rng,a,b){ return Math.floor(rng()*(b-a+1))+a; }
-          function padHHMM(h,m){ return `${pad2(h)}:${pad2(m)}`; }
+          function slots5min(h1,h2){ const out=[]; for(let h=h1;h<=h2;h++){ for(let m=0;m<60;m+=5) out.push(padHHMM(h,m)); } return out; }
 
-          function slots5min(h1,h2){
-            const out=[]; for(let h=h1; h<=h2; h++){ for(let m=0;m<60;m+=5) out.push(padHHMM(h,m)); }
-            return out;
-          }
+          // ===== today plan =====
+          const nowJ = jstNow();
+          const rng = rngForToday();
+          const dow = nowJ.getUTCDay(); // 0=Sun,1=Mon,...6=Sat
+          const isWeekend = (dow===0 || dow===6);
 
-          function triangularInt(rng,min,mode,max){
-            const u=rng(), c=(mode-min)/(max-min); let val;
-            if(u<c) val=min+Math.sqrt(u*(max-min)*(mode-min)); else val=max-Math.sqrt((1-u)*(max-min)*(max-mode));
+          // 三角分布で本数（17〜27、中心22）
+          function triangularInt(r,min,mode,max){
+            const u=r(), c=(mode-min)/(max-min); let val;
+            if(u<c) val=min+Math.sqrt(u*(max-min)*(mode-min));
+            else    val=max-Math.sqrt((1-u)*(max-min)*(max-mode));
             return Math.max(min, Math.min(max, Math.round(val)));
           }
+          const COUNT = triangularInt(rng,17,22,27);
 
-          const nowJ = jstNow();
-          const dow = nowJ.getUTCDay(); // 0=Sun
-          const rng = rngForToday();
-
-          const countToday = triangularInt(rng,17,22,27);
+          // 時間帯重み（週末はやや多め）
           const windows = [
-            { name:'morning', range:[6,10],  base:0.9 },
-            { name:'noon',    range:[11,15], base:1.1 },
-            { name:'evening', range:[18,21], base:1.3 },
-            { name:'late',    range:[22,23], base:0.5 },
-          ].map(w => ({ ...w, base: w.base*( (dow===0||dow===6) ? 1.15 : 1 ) }));
+            { name:'early',   range:[5,8],   w:0.7 },  // 早朝
+            { name:'morning', range:[6,10],  w:1.0 },
+            { name:'noon',    range:[11,15], w:1.2 },
+            { name:'evening', range:[18,21], w:1.3 },
+            { name:'late',    range:[22,23], w:0.6 },
+          ].map(w=>({ ...w, w: w.w*(isWeekend?1.1:1) }));
 
-          const totalW = windows.reduce((s,w)=>s+w.base,0);
-          const alloc = windows.map(w=>({name:w.name, n: Math.floor(countToday*(w.base/totalW))}));
-          let rem = countToday - alloc.reduce((s,a)=>s+a.n,0);
-          while(rem-->0) alloc[randInt(rng,0,alloc.length-1)].n++;
-
-          const selected = new Set();
-          function pickSlots(range, n){
-            const NEAR=new Set(); const pool=slots5min(range[0],range[1]);
-            let tries=0;
-            while(n>0 && tries<10000){
-              tries++;
-              const s = pool[randInt(rng,0,pool.length-1)];
-              if(selected.has(s) || NEAR.has(s)) continue;
-              const [H,M]=s.split(':').map(Number);
-              for(let d=-2; d<=2; d++){
-                const mm=(H*60+M)+d*5; if(mm<0||mm>=24*60) continue;
-                const h2=Math.floor(mm/60), m2=mm%60; NEAR.add(padHHMM(h2,m2));
+          // 5分刻み抽選（±10分の連投回避）
+          const selected = [];
+          (function pickSlots(){
+            const taken = new Set(), near=new Set();
+            const totalW = windows.reduce((s,w)=>s+w.w,0);
+            const alloc = windows.map(w=>({range:w.range, n: Math.floor(COUNT*(w.w/totalW)), name:w.name}));
+            let rem = COUNT - alloc.reduce((s,a)=>s+a.n,0);
+            while(rem-->0) alloc[randInt(rng,0,alloc.length-1)].n++;
+            for(const a of alloc){
+              const pool = slots5min(a.range[0], a.range[1]);
+              let n=a.n, tries=0;
+              while(n>0 && tries<10000){
+                tries++;
+                const s = pool[randInt(rng,0,pool.length-1)];
+                if(taken.has(s) || near.has(s)) continue;
+                const [H,M]=s.split(':').map(Number);
+                for(let d=-2; d<=2; d++){
+                  const mm=H*60+M+d*5; if(mm<0||mm>=24*60) continue;
+                  const h2=Math.floor(mm/60), m2=mm%60; near.add(padHHMM(h2,m2));
+                }
+                taken.add(s); selected.push({time:s, band:a.name});
+                n--;
               }
-              selected.add(s); n--;
+            }
+            selected.sort((a,b)=>a.time<b.time?-1:1);
+          })();
+
+          // ===== themes & rules =====
+          // 基本テーマ（被りを避けるためクールダウン運用）
+          const THEMES = [
+            '日常の一言',
+            '仕事のTips',
+            '生活のTips',
+            '副業・小さな前進',
+            '借金/マネー習慣',
+            'ゴルフ練習・気づき',
+            'サーフィン/海の感覚',
+            '釣り・自然',
+            '時事ネタ（抽象コメント）',
+          ];
+
+          // 曜日×時間帯で許可テーマを制御
+          function allowedThemes(dow, band){
+            const wk = (dow>=1 && dow<=5);
+            if (wk) {
+              if (band==='early') {
+                // 早朝はサーフィンOK
+                return ['日常の一言','生活のTips','仕事のTips','副業・小さな前進','借金/マネー習慣','サーフィン/海の感覚','釣り・自然'];
+              } else if (band==='morning' || band==='noon') {
+                // 勤務時間帯は仕事/生活中心。趣味は原則外す
+                return ['日常の一言','仕事のTips','生活のTips','副業・小さな前進','借金/マネー習慣','時事ネタ（抽象コメント)'.replace(')','）')];
+              } else if (band==='evening' || band==='late') {
+                // 退勤後は全解禁
+                return THEMES;
+              }
+            } else {
+              // 週末は基本全解禁（朝はサーフィン寄り）
+              if (band==='early') {
+                return ['日常の一言','生活のTips','サーフィン/海の感覚','釣り・自然','ゴルフ練習・気づき'];
+              }
+              return THEMES;
+            }
+            return THEMES;
+          }
+
+          // 重み（週の流れ）
+          function baseWeight(theme, dow){
+            const wk = (dow>=1 && dow<=5);
+            if (wk) {
+              // 平日：仕事/生活系を厚め
+              if (theme==='仕事のTips') return 1.35;
+              if (theme==='生活のTips') return 1.25;
+              if (theme==='副業・小さな前進') return 1.2;
+              if (theme==='借金/マネー習慣') return 1.1;
+              if (theme==='時事ネタ（抽象コメント）') return 0.6;
+              // 趣味系はやや軽めだが禁止ではない（退勤後に出る）
+              if (theme==='ゴルフ練習・気づき') return 0.9;
+              if (theme==='サーフィン/海の感覚') return 0.9;
+              if (theme==='釣り・自然') return 0.9;
+              return 1.0;
+            } else {
+              // 週末：趣味OK、日曜は生活/内省も少し上げる
+              if (theme==='ゴルフ練習・気づき') return 1.25;
+              if (theme==='サーフィン/海の感覚') return 1.25;
+              if (theme==='釣り・自然') return 1.1;
+              if (dow===0 && (theme==='生活のTips' || theme==='日常の一言')) return 1.2;
+              return 1.0;
             }
           }
-          for(const a of alloc){ const w=windows.find(x=>x.name===a.name); pickSlots(w.range,a.n); }
 
+          // クールダウン：同テーマは120分空ける、直近2連続禁止
+          const COOLDOWN_MINUTES = 120;
+          function minutes(t){ const [H,M]=t.split(':').map(Number); return H*60+M; }
+
+          // スケジュールにテーマを割当
+          const themePlan = [];
+          const lastTimeByTheme = new Map();
+          function pickThemeForSlot(idx){
+            const slot = selected[idx];
+            const allow = allowedThemes(dow, slot.band);
+            // 候補作成（クールダウン適用）
+            const last1 = themePlan[idx-1]?.theme || null;
+            const last2 = themePlan[idx-2]?.theme || null;
+            const ban = (last1 && last1===last2) ? last1 : null;
+
+            let candidates = [];
+            for (const th of allow){
+              if (ban && th===ban) continue;
+              const lastT = lastTimeByTheme.get(th);
+              if (lastT!=null) {
+                const gap = minutes(slot.time) - lastT;
+                if (gap < COOLDOWN_MINUTES) continue;
+              }
+              candidates.push(th);
+            }
+            // もし候補ゼロならクールダウンを少し緩和（60分）
+            if (!candidates.length){
+              for (const th of allow){
+                if (ban && th===ban) continue;
+                const lastT = lastTimeByTheme.get(th);
+                const gap = (lastT==null) ? 1e9 : (minutes(slot.time)-lastT);
+                if (gap >= 60) candidates.push(th);
+              }
+            }
+            // それでもゼロなら、許可テーマからランダム
+            if (!candidates.length) candidates = allow.slice();
+
+            // 重み抽選
+            const weights = candidates.map(t => baseWeight(t, dow));
+            const sum = weights.reduce((s,x)=>s+x,0);
+            let r = rng()*sum, pickIdx = 0;
+            for(let i=0;i<candidates.length;i++){ r-=weights[i]; if(r<=0){ pickIdx=i; break; } }
+            const chosen = candidates[pickIdx];
+
+            lastTimeByTheme.set(chosen, minutes(slot.time));
+            return chosen;
+          }
+          for (let i=0;i<selected.length;i++){
+            const theme = pickThemeForSlot(i);
+            themePlan.push({ time:selected[i].time, band:selected[i].band, theme });
+          }
+
+          // ===== post decision =====
           const curH = nowJ.getUTCHours(), curM = Math.floor(nowJ.getUTCMinutes()/5)*5;
           const CUR = padHHMM(curH,curM);
-          if(!selected.has(CUR)){ console.log("skip", CUR, "target:", countToday, "picked:", selected.size); process.exit(0); }
+          const slotIdx = themePlan.findIndex(x => x.time === CUR);
+          if (slotIdx === -1){
+            console.log("skip", CUR, "target:", COUNT, "picked:", themePlan.length);
+            process.exit(0);
+          }
+          const theme = themePlan[slotIdx].theme;
 
-          function choiceWeighted(rng, arr){ const sum=arr.reduce((s,i)=>s+i.w,0); let r=rng()*sum; for(const i of arr){ r-=i.w; if(r<=0) return i.v; } return arr[arr.length-1].v; }
-          const theme = choiceWeighted(rng, [
-            {v:'借金返済/マネー習慣', w:1.2},
-            {v:'副業・小さな前進',   w:1.3},
-            {v:'ゴルフ練習・気づき', w:0.9},
-            {v:'サーフィン/海の感覚',w:0.7},
-            {v:'釣り・自然',         w:0.6},
-            {v:'生活の小ネタ',       w:0.8},
-          ]);
-
+          // ===== OpenAI generation =====
           async function genWithOpenAI(){
             const system = [
-              "あなたは30代の日本人。借金返済中だが前向き。",
-              "副業やゴルフ/サーフィン/釣りの実感ベースで、",
-              "X向けの自然な日本語ツイートを作る。",
+              "X向けの自然な日本語の投稿文を作る。",
               "140文字以内。ハッシュタグ禁止。絵文字は入れても1個まで。",
-              "広告っぽさ/過度な断定/煽りはNG。出力は本文のみ。"
-            ].join("");
-            const user = `日本時間 ${pad2(nowJ.getUTCMonth()+1)}/${pad2(nowJ.getUTCDate())} ${pad2(curH)}:${pad2(curM)}ごろ。テーマは「${theme}」。体験っぽい一言＋小さな学びを1本。語尾やリズムは毎回変える。`;
+              "テンプレ感のある決まり文句は避ける。広告っぽさ・過度な断定はNG。",
+              "前後の文脈がなくても自然に読めるように。",
+              "通常は1文〜2文。ただし全テーマにおいて約2割の確率で、短いリスト型（2点まで）にしてよい。"
+            ].join(" ");
+
+            const extraByTheme = {
+              '日常の一言': "素朴な日常の気づきや、小さな感情の揺れを率直に。",
+              '仕事のTips': "具体的で再現性のある小ワザをひとつ。今日の時間帯に合う内容で。",
+              '生活のTips': "暮らしを少し良くする微小な工夫をひとつ。実体験ベースで。",
+              '副業・小さな前進': "やったこと→気づき→次の一歩の簡潔な流れで。",
+              '借金/マネー習慣': "煽らず、行動ベースで。数字の断定や誇張は避ける。",
+              'ゴルフ練習・気づき': "練習や感覚のメモを短く。専門用語は使いすぎない。",
+              'サーフィン/海の感覚': "海や体の感覚を淡々と。安全配慮や無理しない姿勢を一言添える。",
+              '釣り・自然': "自然条件と自分の工夫を短く。誇張はしない。",
+              '時事ネタ（抽象コメント）': "固有名詞は避け、現象の抽象パターンや学びを一言で。"
+            };
+            const extra = extraByTheme[theme] || "";
+
+            const user = `日本時間 ${pad2(nowJ.getUTCMonth()+1)}/${pad2(nowJ.getUTCDate())} ${pad2(curH)}:${pad2(curM)}ごろ。
+テーマ:「${theme}」。
+${extra}
+出力は本文のみ。`;
 
             const resp = await fetch('https://api.openai.com/v1/chat/completions',{
               method:'POST',
               headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${process.env.OPENAI_API_KEY}` },
               body: JSON.stringify({
-                model:'gpt-4o-mini', temperature:0.9, presence_penalty:0.3, frequency_penalty:0.2, max_tokens:120,
-                messages:[ {role:'system',content:system}, {role:'user',content:user} ]
+                model: 'gpt-4o-mini',
+                temperature: 0.95,
+                presence_penalty: 0.4,
+                frequency_penalty: 0.3,
+                max_tokens: 120,
+                messages: [
+                  { role:'system', content: system },
+                  { role:'user', content: user }
+                ]
               })
             });
             const json = await resp.json();
             if(!resp.ok) throw new Error(`OpenAI error: ${resp.status} ${JSON.stringify(json)}`);
             let text = (json.choices?.[0]?.message?.content || "").trim();
+            // ハッシュタグ除去 & 140字ガード
             text = text.replace(/#[\p{L}0-9_一-龥ー]+/gu,"").trim();
             const arr = Array.from(text); if(arr.length>140) text = arr.slice(0,140).join('');
             return text;
           }
 
+          // ===== post =====
           async function postToX(text){
             const client = new TwitterApi({
               appKey: process.env.X_CONSUMER_KEY,
@@ -150,7 +281,7 @@ jobs:
               const text = await genWithOpenAI();
               if(!text) throw new Error('empty text');
               const id = await postToX(text);
-              console.log('posted', CUR, id, text);
+              console.log('posted', CUR, id, `[${theme}]`, text);
             }catch(e){
               console.error('failed', e);
               process.exit(1);
