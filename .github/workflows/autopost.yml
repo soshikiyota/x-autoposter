@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      force:
-        description: "Force post now (1=yes, 0=no)"
-        required: false
-        default: "1"
 
 concurrency:
   group: x-autopost-daily
@@ -101,7 +96,7 @@ jobs:
 
           const curH = nowJ.getUTCHours(), curM = Math.floor(nowJ.getUTCMinutes()/5)*5;
           const CUR = padHHMM(curH,curM);
-          if(!selected.has(CUR)){ console.log("skip", CUR, "target:", countToday, "picked:", selected.size); process.exit(0); }
+          // if(!selected.has(CUR)){ console.log("skip", CUR, "target:", countToday, "picked:", selected.size); process.exit(0); }
 
           function choiceWeighted(rng, arr){ const sum=arr.reduce((s,i)=>s+i.w,0); let r=rng()*sum; for(const i of arr){ r-=i.w; if(r<=0) return i.v; } return arr[arr.length-1].v; }
           const theme = choiceWeighted(rng, [
@@ -171,5 +166,4 @@ jobs:
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
           SALT: ${{ secrets.SALT }}
-          FORCE: ${{ github.event.inputs.force || '0' }}   # ← 追加
         run: node post.js
