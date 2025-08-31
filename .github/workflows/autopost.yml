@@ -5,9 +5,6 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -23,10 +20,18 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm i twitter-api-v2
 
-      - name: Create script
+      # ここで Node スクリプトを埋め込んで直接実行（heredoc）
+      - name: Run poster
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
+          X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+          SALT: ${{ secrets.SALT }}
         shell: bash
         run: |
-          cat > post.js <<'EOF'
+          node - <<'NODE'
           const { TwitterApi } = require('twitter-api-v2');
 
           // ===== helpers =====
@@ -150,7 +155,6 @@ jobs:
           // 一日のテーマ上限（時事は10%まで）
           const capByTheme = new Map();
           capByTheme.set('時事ネタ(抽象コメント)', Math.max(1, Math.floor(COUNT*0.10)));
-          // 他は制限なし
           const usedCount = new Map();
 
           const themePlan = [];
@@ -238,9 +242,8 @@ jobs:
               '釣り・自然': "自然条件と自分の工夫を短く。誇張はしない。",
               '時事ネタ(抽象コメント)': "固有名詞は避け、現象の抽象パターンや学びを一言で。"
             };
-            const hh = pad2(nowJ.getUTCMonth()+1), dd = pad2(nowJ.getUTCDate());
             const extra = extraByTheme[theme] || "";
-            const user = `日本時間 ${hh}/${dd} ${pad2(curH)}:${pad2(curM)}ごろ。
+            const user = `日本時間 ${pad2(nowJ.getUTCMonth()+1)}/${pad2(nowJ.getUTCDate())} ${pad2(curH)}:${pad2(curM)}ごろ。
 テーマ:「${theme}」。
 ${extra}
 出力は本文のみ。`;
@@ -291,14 +294,4 @@ ${extra}
               process.exit(1);
             }
           })();
-          EOF
-
-      - name: Run poster
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
-          X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
-          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
-          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
-          SALT: ${{ secrets.SALT }}
-        run: node post.js
+          NODE
