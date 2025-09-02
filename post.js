@@ -196,24 +196,16 @@ if (inQuietWindow(nowJ)) {
 }
 
 // ===== post decision =====
-// ===== post decision =====
 const curH = nowJ.getUTCHours(), curM = Math.floor(nowJ.getUTCMinutes()/5)*5;
 const CUR = padHHMM(curH,curM);
-let slotIdx = themePlan.findIndex(x => x.time === CUR);
+const slotIdx = themePlan.findIndex(x => x.time === CUR);
 
-// コメントアウトでskipを無効化した場合でも、ここで“即席スロット”を作って埋める
-function pickImmediateTheme() {
-  const hour = nowJ.getUTCHours();
-  const allow = allowedThemesFor(CUR);
-  // 重み抽選で1つ選ぶ
-  const weights = allow.map(t => baseWeight(t, hour));
-  const sum = weights.reduce((s,x)=>s+x,0);
-  let r = rng()*sum, idx=0;
-  for (let i=0;i<allow.length;i++){ r -= weights[i]; if(r<=0){ idx=i; break; } }
-  const theme = allow[idx];
-  const tone = toneFor(theme, 'normal');
-  return { time: CUR, hour, theme, kind:'normal', tone };
+if (slotIdx === -1){
+  console.log("skip", CUR, "target:", COUNT, "picked:", themePlan.length);
+  process.exit(0);
 }
+
+const slot = themePlan[slotIdx];
 
 let slot;
 if (slotIdx === -1) {
