@@ -199,10 +199,10 @@ if (inQuietWindow(nowJ)) {
 const curH = nowJ.getUTCHours(), curM = Math.floor(nowJ.getUTCMinutes()/5)*5;
 const CUR = padHHMM(curH,curM);
 const slotIdx = themePlan.findIndex(x => x.time === CUR);
-if (slotIdx === -1){
-  console.log("skip", CUR, "target:", COUNT, "picked:", themePlan.length);
-  process.exit(0);
-}
+//if (slotIdx === -1){
+  //console.log("skip", CUR, "target:", COUNT, "picked:", themePlan.length);
+  //process.exit(0);
+//}
 const slot = themePlan[slotIdx];
 
 // ===== OpenAI generation =====
@@ -213,14 +213,16 @@ async function genWithOpenAI(){
   : tone==='hard'     ? "語尾は断定しすぎない事実語り。落ち着いた口調で説得力を優先。"
   :                     "語尾は中庸。柔らかさと情報性のバランスをとる。";
 
-  const system = [
-    "X向けの自然な日本語の投稿文を作る。",
-    "140文字以内。ハッシュタグ禁止。絵文字は入れても1個まで。",
-    "テンプレ感のある決まり文句は避ける。広告っぽさ・過度な断定はNG。",
-    "前後の文脈がなくても自然に読めるように。",
-    "通常は1文〜2文。ただし全テーマにおいて約2割の確率で、短いリスト型（2点まで）にしてよい。",
-    styleLine
-  ].join(" ");
+const system = [
+  "X向けの自然な日本語の投稿文を作る。",
+  "140文字以内。ハッシュタグ禁止。絵文字は入れても1個まで。",
+  "テンプレ感のある決まり文句は避ける。広告っぽさ・過度な断定はNG。",
+  "前後の文脈がなくても自然に読めるように。",
+  "通常は1文〜2文。ただし全テーマにおいて約2割の確率で、短いリスト型（2点まで）にしてよい。",
+  "語尾や文体は日本人の自然なツイートっぽさを優先し、教科書的な表現は避ける。",
+  "柔らかめの場合は『〜かな』『〜だな』『〜してみた』のような自然な砕け方を混ぜる。",
+  "硬めの場合は断定は避けつつ『〜しておくと良い』『〜しやすい』のような助言口調にする。"
+].join(" ");
 
   const extraByTheme = {
     '日常の一言': "素朴な日常の気づきや小さな感情の揺れを率直に。",
