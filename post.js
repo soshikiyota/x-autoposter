@@ -308,8 +308,13 @@ async function postToX(text){
     if(!text) throw new Error('empty text');
     const id = await postToX(text);
     const CUR = padHHMM(nowJ.getUTCHours(), Math.floor(nowJ.getUTCMinutes()/5)*5);
-    const slot = themePlan.find(x=>x.time===CUR);
-    console.log('posted', CUR, id, `[${slot.theme}/${slot.kind||'normal'}|${slot.tone}]`, text);
+
+    // ← ここで themePlan を探すのではなく、上で決めた slot を使う
+    const themeLabel = slot?.theme ?? 'unknown';
+    const kindLabel  = slot?.kind  ?? 'normal';
+    const toneLabel  = slot?.tone  ?? 'balanced';
+
+    console.log('posted', CUR, id, `[${themeLabel}/${kindLabel}|${toneLabel}]`, text);
   }catch(e){
     console.error('failed', e);
     process.exit(1);
