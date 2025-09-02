@@ -205,15 +205,8 @@ if (slotIdx === -1){
   process.exit(0);
 }
 
-const slot = themePlan[slotIdx];
-
-let slot;
-if (slotIdx === -1) {
-  // 本来はskipする時間帯 → テスト用に即席スロットを生成して投稿続行
-  slot = pickImmediateTheme();
-} else {
-  slot = themePlan[slotIdx];
-}
+// ここは “宣言” ではなく “代入” にすること（let/const を付けない）
+slot = themePlan[slotIdx];
 
 // ===== OpenAI generation =====
 async function genWithOpenAI(){
